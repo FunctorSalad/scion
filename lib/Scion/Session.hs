@@ -17,6 +17,7 @@ import Prelude hiding ( mod )
 import GHC hiding ( flags, load )
 import HscTypes ( srcErrorMessages, SourceError, isBootSummary )
 import Exception
+import StringBuffer (stringToStringBuffer)
 
 import Scion.Types
 import Scion.Types.Notes
@@ -30,10 +31,11 @@ import Data.IORef
 import Data.Maybe       ( isJust )
 import Data.Monoid
 import Data.Time.Clock  ( getCurrentTime, diffUTCTime )
-import System.Directory ( getCurrentDirectory )
+import System.Directory ( getCurrentDirectory, canonicalizePath )
 import System.FilePath  ( isRelative, makeRelative, normalise )
-import Control.Exception
+import System.Time      ( getClockTime )
 
+import Control.Exception
 ------------------------------------------------------------------------------
 
 -- TODO: have some kind of project description file, that allows us to
@@ -105,7 +107,7 @@ projectRootDir :: ScionM FilePath
 projectRootDir = do
    -- _ <- getLocalBuildInfo -- ensure we have a current project
    -- TODO: error handling
-   liftIO $ getCurrentDirectory
+   liftIO (canonicalizePath =<< getCurrentDirectory)
 
 -- | Set GHC's dynamic flags for the given component of the current Cabal
 -- project (see 'openCabalProject').
@@ -151,24 +153,45 @@ setComponentTargets (Component c) = do
 --    contain the specified component.
 -- 
 loadComponent :: Component
-              -> ScionM CompilationResult
-                 -- ^ The compilation result.
-loadComponent comp = do
+	      -> ScionM CompilationResult
+loadComponent comp = loadComponent' comp False
+
+loadComponent' :: Component
+	       -> Bool -- ^ Should we build on disk?
+               -> ScionM CompilationResult
+                  -- ^ The compilation result.
+loadComponent' comp output = do
    -- TODO: group warnings by file
    resetSessionState
    setActiveComponent comp
    -- Need to set DynFlags first, so that the search paths are set up
    -- correctly before looking for the targets.
    setComponentDynFlags comp
+   dflags0 <- getSessionDynFlags
+   let dflags
+         | output = dflags0{ hscTarget = defaultObjectTarget
+                          , ghcMode = CompManager
+                          , ghcLink = LinkBinary
+                          }
+         | otherwise = dflags0
+   setSessionDynFlags dflags
    setComponentTargets comp
    rslt <- load LoadAllTargets
+   setSessionDynFlags dflags    -- XXX: Why is this necessary?
+   getDefSiteDB rslt
+   return rslt
+   
+-- | Utility method to regenerate defSiteDB after loading.
+getDefSiteDB :: CompilationResult -- ^ The result of loading.
+             -> ScionM ()
+getDefSiteDB rslt = do
    mg <- getModuleGraph
    base_dir <- projectRootDir
    db <- moduleGraphDefSiteDB base_dir mg
    liftIO $ evaluate db
    modifySessionState $ \s -> s { lastCompResult = rslt
                                 , defSiteDB = db }
-   return rslt
+   return ()
 
 -- | Make the specified component the active one.  Sets the DynFlags
 --  to those specified for the given component.  Unloads the possible
@@ -261,6 +284,7 @@ unload = do
 addCmdLineFlags :: [String] -> ScionM [PackageId]
 addCmdLineFlags flags = do
   message deafening $ "Setting Flags: " ++ show flags
+  liftIO $ putStrLn $ "Setting Flags: " ++ show flags
   dflags <- getSessionDynFlags
   res <- gtry $ parseDynamicFlags dflags (map noLoc flags)
   case res of
@@ -307,20 +331,21 @@ backgroundTypecheckFile ::
        FilePath 
     -> ScionM (Either String CompilationResult)
        -- ^ First element is @False@ <=> step 1 above failed.
-backgroundTypecheckFile fname = do
+backgroundTypecheckFile fname0 = do
+   fname <- liftIO (canonicalizePath fname0)
    root_dir <- projectRootDir
    ifM (not `fmap` isRelativeToProjectRoot fname)
      (return (Left ("file " ++ fname ++ " is not relative to project root " ++ root_dir)))
-     prepareContext
+     (prepareContext fname)
   where
-   prepareContext :: ScionM (Either String CompilationResult)
-   prepareContext = do
+   prepareContext :: FilePath -> ScionM (Either String CompilationResult)
+   prepareContext fname = do
      message verbose $ "Preparing context for " ++ fname
      -- if it's the focused module, we know that the context is right
      mb_focusmod <- gets focusedModule
      case mb_focusmod of
        Just ms | Just f <- ml_hs_file (ms_location ms), f == fname -> 
-          backgroundTypecheckFile' mempty
+          backgroundTypecheckFile' mempty fname
 
        _otherwise -> do
           mb_modsum <- filePathToProjectModule fname
@@ -330,14 +355,14 @@ backgroundTypecheckFile fname = do
             Just modsum -> do
               (_, rslt) <- setContextForBGTC modsum
               if compilationSucceeded rslt
-               then backgroundTypecheckFile' rslt
+               then backgroundTypecheckFile' rslt fname
                else return $ Right rslt
 
-   backgroundTypecheckFile' comp_rslt = do
+   backgroundTypecheckFile' comp_rslt fname = do
       message verbose $ "Background type checking: " ++ fname
       clearWarnings
       start_time <- liftIO $ getCurrentTime
-      modsum <- preprocessModule
+      modsum <- preprocessModule fname
 
       let finish_up tc_res errs = do
               base_dir <- projectRootDir
@@ -366,7 +391,7 @@ backgroundTypecheckFile fname = do
           loadModule ds_mod -- ensure it's in the HPT
           finish_up (Just (Typechecked tcd_mod)) mempty
 
-   preprocessModule = do
+   preprocessModule fname = do
      depanal [] True
      -- reload-calculate the ModSummary because it contains the cached
      -- preprocessed source code
@@ -375,7 +400,45 @@ backgroundTypecheckFile fname = do
        Nothing -> error "Huh? No modsummary after preprocessing?"
        Just ms -> return ms
 
-       
+-- | Typechecks a file whose content are given as a string.
+backgroundTypecheckArbitrary:: 
+       FilePath -- ^ the file path
+    -> String -- ^ the file contents
+    -> ScionM (Either String CompilationResult)
+       -- ^ Error message or compilation result
+backgroundTypecheckArbitrary fname contents = do
+  mb_modsum <- filePathToProjectModule fname
+  case mb_modsum of
+    Nothing -> do
+      return $ Left "Could not find file in module graph."
+
+    Just modsum ->
+      ghandle (\(e' :: GhcException) -> do
+          removeTarget (TargetFile fname Nothing)
+          -- add target without content
+          addTarget (Target (TargetFile fname Nothing) False Nothing)
+          load LoadAllTargets >>= getDefSiteDB
+          throw e') $ do
+
+        let modName = moduleName $ ms_mod modsum
+        -- get contents
+        sb <- liftIO $ stringToStringBuffer contents
+        ct <- liftIO $ getClockTime
+        let tgt = TargetFile fname Nothing
+        -- I don't think we use TargetModule anywhere but hey
+        removeTarget (TargetModule modName)
+        -- remove old target
+        removeTarget tgt
+        -- add target + content
+        addTarget (Target tgt False (Just (sb,ct)))
+      
+        rslt <- load LoadAllTargets
+        getDefSiteDB rslt
+        if compilationSucceeded rslt
+          then backgroundTypecheckFile fname
+          else do
+                   return (Right rslt)
+
 -- | Return whether the filepath refers to a file inside the current project
 --   root.  Return 'False' if there is no current project.
 isRelativeToProjectRoot :: FilePath -> ScionM Bool

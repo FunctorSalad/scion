@@ -1,5 +1,5 @@
 name:            scion
-version:         0.1.0.2
+version:         0.2.0.1
 license:         BSD3
 license-file:    docs/LICENSE
 author:          Thomas Schilling <nominolo@googlemail.com>
@@ -33,24 +33,38 @@ flag server
   description: Install the scion-server.
   default: True
 
+flag cabal_1_8
+
 library
   build-depends:
     base         == 4.*,
-    Cabal        >= 1.5 && < 1.7,
-    containers   == 0.2.*,
+    containers   >= 0.2 && < 0.4,
     directory    == 1.0.*,
     filepath     == 1.1.*,
-    ghc          >= 6.10 && < 6.12,
+    ghc          >= 6.10 && < 6.13,
     ghc-paths    == 0.1.*,
-    ghc-syb      == 0.1.*,
-    hslogger     == 1.0.*,
+    ghc-syb      == 0.2.*,
     json         == 0.4.*,
-    multiset     == 0.1.*,
+    multiset     >= 0.1 && < 0.3,
     time         == 1.1.*,
-    uniplate     == 1.2.*,
-    list-tries   == 0.1.*,
+    uniplate     == 1.5.*,
+    list-tries   >= 0.1 && < 0.3,
     binary       == 0.5.*,
-    array        == 0.2.*
+    array        >= 0.2 && < 0.4,
+    text         == 0.7.*,
+    old-time     == 1.0.*
+
+  if impl(ghc == 6.12.*)
+    build-depends: ghc == 6.12.*, Cabal == 1.8.*
+  else
+    build-depends: ghc < 6.12, Cabal < 1.8
+
+  if flag(cabal_1_8)
+    build-depends:  Cabal == 1.8.*
+    cpp-options:    -DCABAL_VERSION=108
+  else
+    build-depends:  Cabal == 1.6.*
+    cpp-options:    -DCABAL_VERSION=106
 
   hs-source-dirs:  lib
   extensions:      CPP, PatternGuards
@@ -66,7 +80,9 @@ library
     Scion.Inspect.PackageDB,
     Scion.Utils,
     Scion.Session,
+    Scion.Backend,
     Scion.Cabal,
+    Scion.Ghc,
     Scion
 
   if flag(testing)
@@ -81,9 +97,12 @@ library
     cpp-options:   -DRECOMPILE_BUG_FIXED
 
   if impl(ghc == 6.10.*)
-    cpp-options:   -DWPINLINE
+    cpp-options:   -DWPINLINE -DGHC_VERSION=610
 
-  ghc-options:  -Wall
+  if impl(ghc == 6.12.*)
+    cpp-options:   -DGHC_VERSION=612
+
+  ghc-options:  -Wall -fno-warn-unused-do-bind
 
 executable scion-server
   if !flag(server)
@@ -95,20 +114,28 @@ executable scion-server
   build-depends:
     -- From the library:
     base         == 4.*,
-    Cabal        >= 1.5 && < 1.7,
-    containers   == 0.2.*,
+    containers   >= 0.2 && < 0.4,
     directory    == 1.0.*,
     filepath     == 1.1.*,
-    ghc          >= 6.10 && < 6.12,
+    ghc          >= 6.10 && < 6.13,
     ghc-paths    == 0.1.*,
-    ghc-syb      == 0.1.*,
-    hslogger     == 1.0.*,
+    ghc-syb      == 0.2.*,
+    ghc-syb-utils == 0.2.*,
     json         == 0.4.*,
-    multiset     == 0.1.*,
+    multiset     >= 0.1 && < 0.3,
+    hslogger     == 1.0.*,
     time         == 1.1.*,
-    list-tries   == 0.1.*,
+    list-tries   >= 0.1 && < 0.3,
     binary       == 0.5.*,
-    array        == 0.2.*
+    array        >= 0.2 && < 0.4,
+    old-time     == 1.0.*
+
+  if flag(cabal_1_8)
+    build-depends:  Cabal == 1.8.*
+    cpp-options:    -DCABAL_VERSION=108
+  else
+    build-depends:  Cabal == 1.6.*
+    cpp-options:    -DCABAL_VERSION=106
   
   if flag(server)
     build-depends:
@@ -127,6 +154,7 @@ executable scion-server
     Scion.Types
     Scion.Types.Notes
     Scion.Utils
+    Scion.Ghc
 
     Scion.Server.Commands
     Scion.Server.ConnectionIO
@@ -148,5 +176,7 @@ executable scion-server
     cpp-options:   -DRECOMPILE_BUG_FIXED
 
   if impl(ghc == 6.10.*)
-    cpp-options:   -DWPINLINE
+    cpp-options:   -DWPINLINE -DGHC_VERSION=610
 
+  if impl(ghc == 6.12.*)
+    cpp-options:   -DGHC_VERSION=612

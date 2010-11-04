@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable, ScopedTypeVariables #-}
+{-# LANGUAGE DeriveDataTypeable, ScopedTypeVariables, CPP, PatternGuards #-}
 -- |
 -- Module      : Scion.Cabal
 -- Copyright   : (c) Thomas Schilling 2008
@@ -28,12 +28,10 @@ import Text.JSON
 import Control.Monad
 import Data.Data
 import Data.List        ( intercalate )
-import Data.Maybe       ( isJust )
+import Data.Maybe
 import System.Directory ( doesFileExist, getDirectoryContents,
                           getModificationTime )
-import System.FilePath ( (</>), dropFileName, takeExtension )
-
-import Control.Exception
+import System.FilePath ( (</>), dropFileName, takeExtension,dropExtension,(<.>) )
 import System.Exit ( ExitCode(..) )
 
 import qualified Distribution.ModuleName as PD
@@ -42,6 +40,7 @@ import Distribution.Simple.Configure
 import Distribution.Simple.GHC ( ghcOptions )
 import Distribution.Simple.LocalBuildInfo hiding ( libdir )
 import Distribution.Simple.Build ( initialBuildSteps )
+import Distribution.Simple.BuildPaths ( exeExtension )
 import Distribution.Simple.PreProcess ( knownSuffixHandlers )
 import qualified Distribution.PackageDescription as PD
 import qualified Distribution.PackageDescription.Parse as PD
@@ -71,7 +70,7 @@ instance Exception CannotOpenCabalProject where
 data CabalComponent
   = Library FilePath
   | Executable FilePath String
-  deriving (Eq, Show)
+  deriving (Eq, Show, Typeable)
 
 instance IsComponent CabalComponent where
 
@@ -130,7 +129,12 @@ cabalFile (Executable f _) = f
 cabalTargets :: CabalComponent -> ScionM [Target]
 cabalTargets (Library f) = do
   pd <- cabal_package f
+#if CABAL_VERSION < 107
   let modnames = PD.libModules pd
+#else
+  let modnames | Just lib <- PD.library pd = PD.libModules lib
+               | otherwise = []
+#endif
   return (map cabalModuleNameToTarget modnames)
 cabalTargets (Executable f name) = do
   pd <- cabal_package f
@@ -161,12 +165,28 @@ cabal_build_info f = do
   let root_dir = dropFileName f
   io $ getPersistBuildConfig (root_dir </> scionDistDir)
 
+-- | Return command line flags for the component.
 cabalDynFlags :: CabalComponent -> ScionM [String]
 cabalDynFlags component = do
    lbi <- cabal_build_info (cabalFile component)
    bi <- component_build_info component (localPkgDescr lbi)
-   let odir = buildDir lbi
-   return $ ghcOptions lbi bi odir
+   let odir0 = buildDir lbi
+   let odir 
+         | Executable _ exeName' <- component
+           = odir0 </> dropExtension exeName'
+         | otherwise
+           = odir0
+#if CABAL_VERSION < 107
+   let opts = ghcOptions lbi bi odir
+#else
+       clbi
+         | Executable _ exeName' <- component
+           = fromJust $ lookup exeName' (executableConfigs lbi)
+         | otherwise
+           = fromJust $ libraryConfig lbi
+   let opts = ghcOptions lbi bi clbi odir
+#endif
+   return $ opts ++ output_file_opts odir
  where
    component_build_info (Library _) pd
      | Just lib <- PD.library pd = return (PD.libBuildInfo lib)
@@ -177,9 +197,15 @@ cabalDynFlags component = do
        [] -> error "no exe" --noExeError n
        _ -> error $ "Multiple executables, named \"" ++ n ++ 
                     "\" found.  This is weird..."
-   component_build_info _ _ =
-       dieHard "component_build_info: impossible case"
 
+   output_file_opts odir =
+     case component of
+       Executable _ exeName' -> 
+         ["-o", odir </> exeName' <.>
+                  (if null $ takeExtension exeName'
+                   then exeExtension
+                   else "")]
+       _ -> []
 
 -- | Return all components of the specified Cabal file.
 -- 
@@ -293,8 +319,13 @@ configureCabalProject root_dir dist_dir _extra_args = do
    ghandle (\(_ :: IOError) ->
                io $ throwIO $ 
                 CannotOpenCabalProject "Failed to configure") $ do
+#if CABAL_VERSION < 107
      lbi <- io $ configure (Left gen_pkg_descr, (Nothing, []))
                            config_flags
+#else
+     lbi <- io $ configure (gen_pkg_descr, (Nothing, []))
+                           config_flags
+#endif
      io $ writePersistBuildConfig dist_dir lbi
      io $ initialBuildSteps dist_dir (localPkgDescr lbi) lbi V.normal
                             knownSuffixHandlers

@@ -31,15 +31,13 @@ import Scion.Inspect
 import Scion.Inspect.DefinitionSite
 import Scion.Inspect.PackageDB
 import Scion.Cabal
+import Scion.Ghc hiding ( (<+>) )
 
 import DynFlags ( supportedLanguages, allFlags )
 import Exception
 import FastString
-import GHC
 import PprTyThing ( pprTypeForUser )
-import Outputable ( ppr, showSDoc, showSDocDump, dcolon, showSDocForUser,
-                    showSDocDebug, printDump ,showSDocUnqual)
-import qualified Outputable as O ( (<+>), ($$) )
+import qualified Outputable as O ( (<+>) )
 
 import Control.Applicative
 import Control.Monad
@@ -163,6 +161,7 @@ allCommands =
     , cmdThingAtPoint
     , cmdSetGHCVerbosity
     , cmdBackgroundTypecheckFile
+    , cmdBackgroundTypecheckArbitrary
     , cmdAddCmdLineFlag
     , cmdForceUnload
     , cmdDumpDefinedNames
@@ -448,6 +447,13 @@ cmdBackgroundTypecheckFile =
     Cmd "background-typecheck-file" $ reqArg' "file" fromJSString $ cmd
   where cmd fname = backgroundTypecheckFile fname
 
+cmdBackgroundTypecheckArbitrary :: Cmd
+cmdBackgroundTypecheckArbitrary = 
+    Cmd "background-typecheck-arbitrary" $ 
+        reqArg' "file" fromJSString <&> 
+        reqArg' "contents" fromJSString $ cmd
+  where cmd fname contents = backgroundTypecheckArbitrary fname contents
+
 cmdForceUnload :: Cmd
 cmdForceUnload = Cmd "force-unload" $ noArgs $ unload
 
@@ -521,20 +527,20 @@ cmdDumpSources = Cmd "dump-sources" $ noArgs $ cmd
     cmd = do
       tc_res <- gets bgTcCache
       case tc_res of
-        Just (Typechecked tcm) -> do
-          let Just (rn, _, _, _, _) = renamedSource tcm
-          let tc = typecheckedSource tcm
-          liftIO $ putStrLn $ showSDocDump $ ppr rn
-          liftIO $ putStrLn $ showData TypeChecker 2 tc
-          return ()
+        Just (Typechecked tcm)
+         | Just rn <- renamedSourceGroup `fmap` renamedSource tcm ->
+          do let tc = typecheckedSource tcm
+             liftIO $ putStrLn $ showSDocDump $ ppr rn
+             liftIO $ putStrLn $ showData TypeChecker 2 tc
+             return ()
         _ -> return ()
 
 cmdLoad :: Cmd
-cmdLoad = Cmd "load" $ reqArg "component" $ cmd
+cmdLoad = Cmd "load" $ reqArg "component" <&>
+    optArg' "output" False decodeBool $ cmd
   where
-    cmd comp = do
-      liftIO (putStrLn $ "Loading " ++ show comp)
-      loadComponent comp
+    cmd comp output= do
+      loadComponent' comp output
 
 cmdSetVerbosity :: Cmd
 cmdSetVerbosity = 
